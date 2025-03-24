@@ -464,62 +464,11 @@ int main(int argc, const char *argv[]) {
       LidarSetMode(devices[i].handle, kLidarModePowerSaving, OnSetLidarModeCallback, nullptr);
     }
   }
-  printf("Sensor switched to Power Saving mode for 10 seconds...\n");
-  std::this_thread::sleep_for(std::chrono::seconds(10));
+  printf("Sensor switched to Power Saving mode for 1 second...\n");
+  std::this_thread::sleep_for(std::chrono::seconds(1));
 
-  printf("Done Sleeping for 10 seconds, Uninitializing Livox-SDK\n");
+  printf("Done Sleeping for 1 second, Uninitializing Livox-SDK\n");
 
   /** Uninitialize Livox-SDK. */
   Uninit();
 }
-
-
-/// Extra stuff:
-
-
-
-  // // -------------------- Switch Back to Normal Mode, Restart Sampling, and spin Lidar back up --------------------
-  // printf("Switching sensor back to Normal mode...\n");
-  // for (i = 0; i < kMaxLidarCount; ++i) {
-  //   if (devices[i].device_state != kDeviceStateDisconnect) {
-  //     LidarSetMode(devices[i].handle, kLidarModeNormal, OnSetLidarModeCallback, nullptr);
-  //   }
-  // }
-
-  // std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  // // Restart sampling and re-register the data callback if needed:
-  // printf("Restarting sampling for Phase 2 scan.\n");
-  // for (i = 0; i < kMaxLidarCount; ++i) {
-  //     if (devices[i].device_state != kDeviceStateDisconnect) {
-  //         SetDataCallback(devices[i].handle, GetLidarData, nullptr);
-  //         LidarStartSampling(devices[i].handle, OnSampleCallback, nullptr);
-  //         devices[i].device_state = kDeviceStateSampling;
-  //     }
-  // }
-  // // Spin up time (at least 15 seconds) before the next sample can be taken after waking up from sleep mode
-  // printf("spin up time\n");
-  // std::this_thread::sleep_for(std::chrono::seconds(15));
-
-  // // -------------------- Phase 2: Scan for t seconds -------------------- Which for now is saved in the initial file after the first scan...
-  // printf("Phase 2: Done Sleeping, turing off now");
-
-
-  // printf("Phase 2: Scanning for %d seconds.\n", lvx_file_save_time);
-  // last_time = steady_clock::now();
-  // for (i = 0; i < lvx_file_save_time * FRAME_RATE; ++i) {
-  //   std::list<LvxBasePackDetail> point_packet_list_temp;
-  //   {
-  //     std::unique_lock<std::mutex> lock(mtx);
-  //     point_pack_condition.wait_for(lock, milliseconds(kDefaultFrameDurationTime) - (steady_clock::now() - last_time));
-  //     last_time = steady_clock::now();
-  //     point_packet_list_temp.swap(point_packet_list);
-  //   }
-  //   if(point_packet_list_temp.empty()) {
-  //     printf("Point cloud packet is empty.\n");
-  //     break;
-  //   }
-
-  //   printf("Finish save 2 %d frame to lvx file.\n", i);
-  //   lvx_file_handler.SaveFrameToLvxFile(point_packet_list_temp);
-  // }
