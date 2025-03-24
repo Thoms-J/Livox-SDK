@@ -1,18 +1,18 @@
 //
 // The MIT License (MIT)
-//
+// 
 // Copyright (c) 2019 Livox. All rights reserved.
-//
+// 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
 // in the Software without restriction, including without limitation the rights
 // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 // copies of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
-//
+// 
 // The above copyright notice and this permission notice shall be included in
 // all copies or substantial portions of the Software.
-//
+// 
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <string.h>
+#include <thread>            // Added for sleep functionality
 #include "lvx_file.h"
 #include "cmdline.h"
 
@@ -39,6 +40,9 @@ int lvx_file_save_time = 10;
 bool is_finish_extrinsic_parameter = false;
 bool is_read_extrinsic_from_xml = false;
 uint8_t connected_lidar_count = 0;
+int connection_wait_time = 2;
+PointCloudReturnMode return_mode = kFirstReturn;
+
 
 #define FRAME_RATE 20
 
@@ -51,6 +55,14 @@ std::vector<std::string> broadcast_code_list = {
   //"000000000000003",
   //"000000000000004"
 };
+
+
+/** Callback for setting Lidar working mode.
+ * This callback is used when switching the Lidar mode (normal / power saving).
+ */
+void OnSetLidarModeCallback(livox_status status, uint8_t handle, uint8_t response, void *data) {
+  printf("OnSetLidarModeCallback: status %d, handle %d, response %d\n", status, handle, response);
+}
 
 /** Receiving error message from Livox Lidar. */
 void OnLidarErrorStatusCallback(livox_status status, uint8_t handle, ErrorMessage *message) {
@@ -89,7 +101,7 @@ void GetLidarData(uint8_t handle, LivoxEthPacket *data, uint32_t data_num, void 
 
 /** Callback function of starting sampling. */
 void OnSampleCallback(livox_status status, uint8_t handle, uint8_t response, void *data) {
-  printf("OnSampleCallback statues %d handle %d response %d \n", status, handle, response);
+  printf("OnSampleCallback status %d, handle %d, response %d \n", status, handle, response);
   if (status == kStatusSuccess) {
     if (response != 0) {
       devices[handle].device_state = kDeviceStateConnect;
@@ -107,7 +119,7 @@ void OnStopSampleCallback(livox_status status, uint8_t handle, uint8_t response,
 void OnGetLidarExtrinsicParameter(livox_status status, uint8_t handle, LidarGetExtrinsicParameterResponse *response, void *data) {
   if (status == kStatusSuccess) {
     if (response != 0) {
-      printf("OnGetLidarExtrinsicParameter statue %d handle %d response %d \n", status, handle, response->ret_code);
+      printf("OnGetLidarExtrinsicParameter status %d, handle %d, response %d \n", status, handle, response->ret_code);
       std::unique_lock<std::mutex> lock(mtx);
       LvxDeviceInfo lidar_info;
       strncpy((char *)lidar_info.lidar_broadcast_code, devices[handle].info.broadcast_code, kBroadcastCodeSize);
@@ -192,6 +204,10 @@ void OnDeviceInfoChange(const DeviceInfo *info, DeviceEvent type) {
   if (type == kEventConnect) {
     LidarConnect(info);
     printf("[WARNING] Lidar sn: [%s] Connect!!!\n", info->broadcast_code);
+    livox_status result = LidarSetPointCloudReturnMode(handle, return_mode, OnSetLidarModeCallback, nullptr);
+    if (result != kStatusSuccess) {
+      printf("Failed to set return mode for device %s, status code: %d\n", info->broadcast_code, result);
+    } ///////////
   } else if (type == kEventDisconnect) {
     LidarDisConnect(info);
     printf("[WARNING] Lidar sn: [%s] Disconnect!!!\n", info->broadcast_code);
@@ -237,15 +253,14 @@ void OnDeviceBroadcast(const BroadcastDeviceInfo *info) {
   }
 }
 
-/** Wait until no new device arriving in 2 second. */
+/** Wait until no new device arriving in 2 seconds. */
 void WaitForDevicesReady( ) {
   bool device_ready = false;
-  seconds wait_time = seconds(2);
   steady_clock::time_point last_time = steady_clock::now();
   while (!device_ready) {
     std::unique_lock<std::mutex> lock(mtx);
-    lidar_arrive_condition.wait_for(lock,wait_time);
-    if ((steady_clock::now() - last_time + milliseconds(50)) >= wait_time) {
+    lidar_arrive_condition.wait_for(lock, seconds(connection_wait_time));
+    if ((steady_clock::now() - last_time + milliseconds(50)) >= seconds(connection_wait_time)) {
       device_ready = true;
     } else {
       last_time = steady_clock::now();
@@ -287,6 +302,8 @@ void SetProgramOption(int argc, const char *argv[]) {
   cmd.add<std::string>("code", 'c', "Register device broadcast code", false);
   cmd.add("log", 'l', "Save the log file");
   cmd.add<int>("time", 't', "Time to save point cloud to the lvx file", false);
+  cmd.add<int>("wait", 'w', "wait for connection", false);
+  cmd.add<int>("mode", 'm', "Scan mode: 1 for kFirstReturn, 2 for kDualReturn, 3 for kTripleReturn, 4 for kStrongestReturn", false); ///////////////
   cmd.add("param", 'p', "Get the extrinsic parameter from extrinsic.xml file");
   cmd.add("help", 'h', "Show help");
   cmd.parse_check(argc, const_cast<char **>(argv));
@@ -301,27 +318,69 @@ void SetProgramOption(int argc, const char *argv[]) {
     }
     broadcast_code_list.push_back(sn_list);
   }
+
   if (cmd.exist("log")) {
     printf("Save the log file.\n");
     SaveLoggerFile();
   }
   if (cmd.exist("time")) {
-    printf("Time to save point cloud to the lvx file:%d.\n", cmd.get<int>("time"));
+    printf("Time to save point cloud to the lvx file: %d seconds.\n", cmd.get<int>("time"));
     lvx_file_save_time = cmd.get<int>("time");
+  }
+  if (cmd.exist("wait")) {
+    printf("Waiting for the established connection for %d seconds.\n", cmd.get<int>("wait"));
+    connection_wait_time = cmd.get<int>("wait");
   }
   if (cmd.exist("param")) {
     printf("Get the extrinsic parameter from extrinsic.xml file.\n");
     is_read_extrinsic_from_xml = true;
   }
+  if (cmd.exist("mode")) {
+    int mode = cmd.get<int>("mode");
+    switch(mode) {
+      case 1:
+        return_mode = kFirstReturn;
+        break;
+      case 2:
+        return_mode = kDualReturn;
+        break;
+      case 3:
+        return_mode = kTripleReturn;
+        break;
+      case 4:
+        return_mode = kStrongestReturn;
+        break;
+      default:
+        printf("Invalid mode specified, defaulting to kFirstReturn.\n");
+        return_mode = kFirstReturn;
+        break;
+    }
+    printf("Scan mode set to %d\n", mode);
+  }
   return;
 }
 
+// ***** Global variable for return mode. Default is kFirstReturn but can be overridden via command-line option (-m) *****
+
+void SetReturnModeCallback(livox_status status, uint8_t handle, uint8_t response, void *client_data) {
+  if (status == kStatusSuccess) {
+      if (response != 0) {
+          printf("Failed to set return mode, response code: %d\n", response);
+      } else {
+          printf("Return mode set successfully.\n");
+      }
+  } else {
+      printf("Error setting return mode, status code: %d\n", status);
+  }
+}
+
+
 int main(int argc, const char *argv[]) {
-/** Set the program options. */
+  /** Set the program options. */
   SetProgramOption(argc, argv);
 
   printf("Livox SDK initializing.\n");
-/** Initialize Livox-SDK. */
+  /** Initialize Livox-SDK. */
   if (!Init()) {
     return -1;
   }
@@ -333,15 +392,15 @@ int main(int argc, const char *argv[]) {
 
   memset(devices, 0, sizeof(devices));
 
-/** Set the callback function receiving broadcast message from Livox LiDAR. */
+  /** Set the callback function receiving broadcast message from Livox LiDAR. */
   SetBroadcastCallback(OnDeviceBroadcast);
 
-/** Set the callback function called when device state change,
- * which means connection/disconnection and changing of LiDAR state.
- */
+  /** Set the callback function called when device state change,
+   * which means connection/disconnection and changing of LiDAR state.
+   */
   SetDeviceStateUpdateCallback(OnDeviceInfoChange);
 
-/** Start the device discovering routine. */
+  /** Start the device discovering routine. */
   if (!Start()) {
     Uninit();
     return -1;
@@ -368,6 +427,8 @@ int main(int argc, const char *argv[]) {
 
   lvx_file_handler.InitLvxFileHeader();
 
+  // -------------------- Scan for t seconds --------------------
+  printf("Phase 1: Scanning for %d seconds.\n", lvx_file_save_time);
   int i = 0;
   steady_clock::time_point last_time = steady_clock::now();
   for (i = 0; i < lvx_file_save_time * FRAME_RATE; ++i) {
@@ -378,7 +439,7 @@ int main(int argc, const char *argv[]) {
       last_time = steady_clock::now();
       point_packet_list_temp.swap(point_packet_list);
     }
-    if(point_packet_list_temp.empty()) {
+    if (point_packet_list_temp.empty()) {
       printf("Point cloud packet is empty.\n");
       break;
     }
@@ -387,15 +448,78 @@ int main(int argc, const char *argv[]) {
     lvx_file_handler.SaveFrameToLvxFile(point_packet_list_temp);
   }
 
-  lvx_file_handler.CloseLvxFile();
-
-  for (i = 0; i < kMaxLidarCount; ++i) {
-    if (devices[i].device_state == kDeviceStateSampling) {
-/** Stop the sampling of Livox LiDAR. */
-      LidarStopSampling(devices[i].handle, OnStopSampleCallback, nullptr);
-    }
+  // -------------------- Switch to Power Saving Mode --------------------
+    for (i = 0; i < kMaxLidarCount; ++i) {
+      if (devices[i].device_state == kDeviceStateSampling) {
+          LidarStopSampling(devices[i].handle, OnStopSampleCallback, nullptr);
+      }
   }
 
-/** Uninitialize Livox-SDK. */
+  lvx_file_handler.CloseLvxFile();
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  for (i = 0; i < kMaxLidarCount; ++i) {
+    if (devices[i].device_state != kDeviceStateDisconnect) {
+      // Switch to power saving mode
+      LidarSetMode(devices[i].handle, kLidarModePowerSaving, OnSetLidarModeCallback, nullptr);
+    }
+  }
+  printf("Sensor switched to Power Saving mode for 10 seconds...\n");
+  std::this_thread::sleep_for(std::chrono::seconds(10));
+
+  printf("Done Sleeping for 10 seconds, Uninitializing Livox-SDK\n");
+
+  /** Uninitialize Livox-SDK. */
   Uninit();
 }
+
+
+/// Extra stuff:
+
+
+
+  // // -------------------- Switch Back to Normal Mode, Restart Sampling, and spin Lidar back up --------------------
+  // printf("Switching sensor back to Normal mode...\n");
+  // for (i = 0; i < kMaxLidarCount; ++i) {
+  //   if (devices[i].device_state != kDeviceStateDisconnect) {
+  //     LidarSetMode(devices[i].handle, kLidarModeNormal, OnSetLidarModeCallback, nullptr);
+  //   }
+  // }
+
+  // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  // // Restart sampling and re-register the data callback if needed:
+  // printf("Restarting sampling for Phase 2 scan.\n");
+  // for (i = 0; i < kMaxLidarCount; ++i) {
+  //     if (devices[i].device_state != kDeviceStateDisconnect) {
+  //         SetDataCallback(devices[i].handle, GetLidarData, nullptr);
+  //         LidarStartSampling(devices[i].handle, OnSampleCallback, nullptr);
+  //         devices[i].device_state = kDeviceStateSampling;
+  //     }
+  // }
+  // // Spin up time (at least 15 seconds) before the next sample can be taken after waking up from sleep mode
+  // printf("spin up time\n");
+  // std::this_thread::sleep_for(std::chrono::seconds(15));
+
+  // // -------------------- Phase 2: Scan for t seconds -------------------- Which for now is saved in the initial file after the first scan...
+  // printf("Phase 2: Done Sleeping, turing off now");
+
+
+  // printf("Phase 2: Scanning for %d seconds.\n", lvx_file_save_time);
+  // last_time = steady_clock::now();
+  // for (i = 0; i < lvx_file_save_time * FRAME_RATE; ++i) {
+  //   std::list<LvxBasePackDetail> point_packet_list_temp;
+  //   {
+  //     std::unique_lock<std::mutex> lock(mtx);
+  //     point_pack_condition.wait_for(lock, milliseconds(kDefaultFrameDurationTime) - (steady_clock::now() - last_time));
+  //     last_time = steady_clock::now();
+  //     point_packet_list_temp.swap(point_packet_list);
+  //   }
+  //   if(point_packet_list_temp.empty()) {
+  //     printf("Point cloud packet is empty.\n");
+  //     break;
+  //   }
+
+  //   printf("Finish save 2 %d frame to lvx file.\n", i);
+  //   lvx_file_handler.SaveFrameToLvxFile(point_packet_list_temp);
+  // }
